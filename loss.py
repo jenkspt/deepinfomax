@@ -5,80 +5,58 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Uniform
 
-from models import GlobalDIM, LocalDIM, PriorMatch
+from models import GlobalDIM, ConcatAndConvDIM, EncodeAndDotDIM, PriorMatch
 
 
 class DeepInfoMax(nn.Module):
     def __init__(self, 
             alpha, beta, gamma, 
             encoding_size=64, 
-            local_feature_shape=(128, 8, 8)):
+            local_feature_shape=(128, 8, 8),
+            encode_and_dot=True):
 
         super(DeepInfoMax, self).__init__()
 
-        lC, lH, lW = local_feature_shape
+        args = (encoding_size, local_feature_shape)
         # Don't waste resources if hyperparameters are set to zero
-        self.global_disc = GlobalDIM(lC*lH*lW+encoding_size) if alpha > 0 else None
-        self.local_disc = LocalDIM(lC+encoding_size) if beta > 0 else None
+        self.global_disc = GlobalDIM(*args) if alpha > 0 else None
+
+        if encode_and_dot:
+            self.local_disc = EncodeAndDotDIM(*args) if beta > 0 else None
+        else:
+            self.local_disc = ConcatAndConvDIM(*args) if beta > 0 else None
+
         self.prior_disc = PriorMatch(encoding_size) if gamma > 0 else None
-        
+
         # Distributions won't move to GPU
         #self.prior = Uniform(torch.cuda.FloatTensor(0), torch.cuda.FloatTensor(1))
 
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-
-    def global_loss(self, y, M, M_prime):
-        b, c, lH, lW = M.shape
-        # Global mutual information estimation 
-        # Encoder and discriminator should minimize this
-        positive_example = torch.cat([M.view(b, -1), y], dim=-1)
-        negative_example = torch.cat([M_prime.view(b, -1), y], dim=-1)
-
-        positive = self.global_disc(positive_example)
-        negative = self.global_disc(negative_example)
-        return mi_bce_loss(positive, negative)
-
-    def local_loss(self, y, M, M_prime):
-        b, c, lH, lW = M.shape
-        # Local mutual information estimation 
-        # Encoder and discriminator should minimize this
-        _y = y.unsqueeze(-1).unsqueeze(-1)
-        _y = _y.expand(-1, -1, lH, lW)
-
-        positive_example = torch.cat([M, _y], dim=1)
-        negative_example = torch.cat([M_prime, _y], dim=1)
-
-        positive = self.local_disc(positive_example)
-        negative = self.local_disc(negative_example)
-        return mi_bce_loss(positive, negative)/(lH*lW)
-
-    def prior_loss(self, y):
-        prior_sample = torch.rand_like(y)
-        positive = self.prior_disc(prior_sample)
-        negative = self.prior_disc(y)
-
-        prior_disc_loss = mi_bce_loss(positive, negative)   
-        return prior_disc_loss
-
-        prior_enc_loss = -prior_disc_loss                   # Encoder loss for prior
-        return prior_disc_loss, prior_enc_loss
+        # DIM Hyperparameters
+        self.alpha, self.beta, self.gamma = alpha, beta, gamma
 
     def forward(self, y, M, M_prime):
-
-        global_loss = 0.
-        local_loss = 0.
-        prior_disc_loss = prior_enc_loss = 0
-
+        # Default values if loss isn't used
+        global_loss = local_loss = prior_loss = 0.
+        
+        # Global MI loss
         if not self.global_disc is None:
-            global_loss = self.alpha * self.global_loss(y, M, M_prime)
+            positive = self.global_disc(y, M)
+            negative = self.global_disc(y, M_prime)
+            global_loss = self.alpha * mi_bce_loss(positive, negative)
 
+        # Local MI loss
         if not self.local_disc is None:
-            local_loss = self.beta * self.local_loss(y, M, M_prime)
+            lH, lW = M.shape[2:]
+            positive = self.local_disc(y, M)
+            negative = self.local_disc(y, M_prime)
+            local_loss = self.beta * mi_bce_loss(positive, negative)/(lH*lW)
 
+        # Prior (discriminator) loss
         if not self.prior_disc is None:
-            prior_loss = self.gamma * self.prior_loss(y)    # Discriminator loss
+            prior_sample = torch.rand_like(y)
+            positive = self.prior_disc(prior_sample)
+            negative = self.prior_disc(y)
+            prior_loss = self.gamma * mi_bce_loss(positive, negative)
 
         return global_loss, local_loss, prior_loss
 
@@ -118,15 +96,12 @@ if __name__ == "__main__":
     # Verifies that Eq. 4 from the paper is equivalent to binary cross-entropy
     # And GAN divergence
     assert mi == -loss == div
-    """ 
     y = torch.rand(4,64)
     M = torch.randn(4,128,8,8)
     M_prime = torch.cat((M[1:], M[0].unsqueeze(0)), dim=0)
 
-    mi_estimator = DeepInfoMax(0, .5, 0, 
+    mi_estimator = DeepInfoMax(.5, .5, 1, 
             local_feature_shape=M.shape[1:])
 
-    global_loss, local_loss, prior_d_loss, prior_e_loss = mi_estimator(y, M, M_prime)
-    print(global_loss, local_loss, prior_d_loss, prior_e_loss)
-    print(global_loss + local_loss +prior_d_loss)
-    """
+    global_loss, local_loss, prior_loss = mi_estimator(y, M, M_prime)
+    print(global_loss, local_loss, prior_loss)

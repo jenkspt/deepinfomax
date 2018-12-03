@@ -72,8 +72,8 @@ if __name__ == "__main__":
             mi_est_loss.backward()
             mi_optim.step()
             if i % 100 == 0:
-                print(f'Encoder loss: {encoder_loss:.4f}, MI Est loss: {mi_est_loss:.4f}, ', end='')
-                print(f'\t( MI(G) {-global_loss:.2f}, ', end='')
-                print(f'MI(L) {-local_loss:.2f}, ', end='')
-                print(f'Prior loss {prior_loss:.2f} )')
+                print(f'Encoder loss: {encoder_loss:.4f}, MI est loss: {mi_est_loss:.4f}, ', end='')
+                print(f'\t( MI(G): {-global_loss:.2f}, ', end='')
+                print(f'MI(L): {-local_loss:.2f}, ', end='')
+                print(f'Prior loss: {prior_loss:.2f} )')
 

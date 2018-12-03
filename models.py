@@ -70,10 +70,13 @@ class Encoder(nn.Module):
 
 
 class GlobalDIM(nn.Module):
-    def __init__(self, in_features):
+    def __init__(self,
+            encoding_size=64, 
+            local_feature_shape=(128, 8, 8)):
         super().__init__()
-        
-        self.sequential = nn.Sequential(
+        in_features = encoding_size + np.product(local_feature_shape)
+
+        self.main = nn.Sequential(
                 nn.Linear(in_features, 512),
                 nn.ReLU(),
                 nn.Linear(512, 512),
@@ -81,30 +84,48 @@ class GlobalDIM(nn.Module):
                 nn.Linear(512, 1)
             )
 
-    def forward(self, x):
-        return self.sequential(x)
+    def forward(self, y, M):
+        # Flatten local features and concat with global encoding
+        x = torch.cat([M.view(M.size(0), -1), y], dim=-1)
+        return self.main(x)
 
 
-class LocalDIM1(nn.Module):
+class ConcatAndConvDIM(nn.Module):
     """ Concat and Convolve Architecture """
-    def __init__(self, in_channels):
+    def __init__(self,
+            encoding_size=64, 
+            local_feature_shape=(128, 8, 8)):
         super().__init__()
+        
+        c, lH, lW = local_feature_shape
+
         self.sequential = nn.Sequential(
-                nn.Conv2d(in_channels, 512, kernel_size=1),
+                nn.Conv2d(c + encoding_size, 512, kernel_size=1),
                 nn.ReLU(),
                 nn.Conv2d(512, 512, kernel_size=1),
                 nn.ReLU(),
                 nn.Conv2d(512, 1, kernel_size=1)
             )
 
-    def forward(self, x):
+    def forward(self, y, M):
+        b, lC, lH, lW = M.shape
+        # Concat
+        y = y.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, lH, lW)
+        x = torch.cat([M, y], dim=1)    # Over channel dimension
+        # Convolve
         return self.sequential(x)
 
-class LocalDIM2(nn.Module):
+class EncodeAndDotDIM(nn.Module):
     """ Encode and Dot Architecture """
-    def __init__(self, encoding_size):
-        super().__init__()
+    def __init__(self,
+            encoding_size=64, 
+            local_feature_shape=(128, 8, 8)):
 
+        super().__init__()
+        
+        lC, lH, lW = local_feature_shape
+
+        # Global encoder
         self.G1 = nn.Sequential(
                 nn.Linear(encoding_size, 2048),
                 nn.ReLU(),
@@ -115,21 +136,26 @@ class LocalDIM2(nn.Module):
                 nn.ReLU()
             )
 
+        # Local encoder
         self.L1 = nn.Sequential(
-                nn.Conv2d(1, 2048, 1),
+                nn.Conv2d(lC, 2048, 1),
                 nn.ReLU(),
                 nn.Conv2d(2048, 2048, 1)
             )
 
         self.L2 = nn.Sequential(
-                nn.Conv2d(1, 2048, 1),
+                nn.Conv2d(lC, 2048, 1),
                 nn.ReLU(),
             )
 
     def forward(self, y, M):
-        raise NotImplementedError
         g = self.G1(y) + self.G2(y)
         l = self.L1(M) + self.L2(M)
+
+        # broadcast over channel dimension
+        g = g.view(g.size(0), g.size(1), 1, 1)
+        return (g * l).sum(1)
+        
 
 
 
@@ -154,20 +180,26 @@ if __name__ == "__main__":
 
     # Encoder
     x = torch.randn([4,3,32,32])
-
     encoder = Encoder(feature_layer=2)
     y, M = encoder(x)
 
     # Global
-    global_input = torch.randn(4, 512*28**2+64) 
-    global_disc = GlobalDIM(in_features=512*28**2+64)
-    logits = global_disc(global_input)
+    y = torch.randn(4, 64)
+    M = torch.randn(4, 128, 8, 8)
+    global_disc = GlobalDIM(64, (128, 8, 8))
+    logits = global_disc(y, M)
 
-    # Local 
-    local_input = torch.randn(4, 512+64, 28, 28)
-    local_disc = LocalDIM(in_channels=512+64)
-    logits = local_disc(local_input)
-    print(logits.shape)
+    # Local (concat and convolve)
+    y = torch.randn(4, 64)
+    M = torch.randn(4, 128, 8, 8)
+    local_disc = ConcatAndConvDIM(64, (128, 8, 8))
+    logits = local_disc(y, M)
+
+    # Local (encode and dot)
+    y = torch.randn(4, 64)
+    M = torch.randn(4, 128, 8, 8)
+    local_disc = EncodeAndDotDIM(64, (128, 8, 8))
+    logits = local_disc(y, M)
 
     # Prior
     z = torch.rand(64).to(device)
