@@ -12,10 +12,8 @@ from torchvision.transforms import ToTensor
 
 from importlib import reload
 
-import loss
 import models
 
-reload(loss)
 reload(models)
 
 if __name__ == "__main__":
@@ -35,7 +33,7 @@ if __name__ == "__main__":
             input_shape=(3,32,32),
             feature_layer=3)
 
-    mi_estimator = loss.DeepInfoMax(
+    mi_estimator = models.MIEstimator(
             alpha, beta, gamma, 
             local_feature_shape=encoder.local_feature_shape,
             encoding_size=encoder.encoding_size)
