@@ -53,18 +53,20 @@ class Encoder(nn.Module):
         #print(f'lfC {lfC}, lfH {lfH}, lfW {lfW}') 
         # Local feature encoder
         self.C = nn.Sequential(*layers[:feature_layer])
-        self.f0 = nn.Sequential(*layers[feature_layer:])
+        # Global feature encoder
+        self.f0 = nn.Sequential(*layers[feature_layer:])    # Remaining conv layers
         self.f1 = nn.Sequential(
                 nn.Linear(out_channels//2 * H * W, 1024, bias=False),
                 nn.BatchNorm1d(1024),
-                nn.ReLU(),
-                nn.Linear(1024, self.encoding_size, bias=True)
+                nn.ReLU()
             )
+        self.linear = nn.Linear(1024, self.encoding_size, bias=True)
 
     def forward(self, x):
-        M = self.C(x)                       # Local feature
-        h = self.f0(M)
-        y = self.f1(h.view(h.size(0), -1))  # Global encoding
+        M = self.C(x)                               # Local feature
+        conv = self.f0(M)                           # Last conv Layer
+        fc = self.f1(conv.view(conv.size(0), -1))   # fully-connected
+        y = self.linear(fc)                         # Global encoding
         return y, M
 
 
