@@ -1,3 +1,6 @@
+import numpy as np
+import argparse
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,52 +12,43 @@ from torch.distributions import Uniform
 from torchvision.datasets.cifar import CIFAR10
 from torchvision.transforms import Compose, ToTensor, Normalize
 
-from sklearn.svm import LinearSVC
-
 
 
 from importlib import reload
-from linear_classifier import eval_encoder
+from classifier import eval_encoder
+from utils import get_loaders
 
 import models
 reload(models)
 
 
-def get_loaders(dataset_name='cifar10', batch_size=32):
-    if dataset_name == 'cifar10':
-        transform = Compose([
-            ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
-        train_set = CIFAR10('data', train=True, transform=transform)
-        train_loader = DataLoader(train_set, batch_size=batch_size, 
-                shuffle=True, pin_memory=torch.cuda.is_available())
-
-        valid_set = CIFAR10('data', train=False, transform=transform)
-        valid_loader = DataLoader(valid_set, batch_size=batch_size, 
-                shuffle=False, pin_memory=torch.cuda.is_available())
-    else:
-        raise ValueError(f'{dataset_name} not implimented')
-
-    return {'train':train_loader, 'valid':valid_loader}
-
-
 if __name__ == "__main__":
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    epochs = 40
-    num_classes = 10
-    batch_size=32
-    alpha = 1
-    beta = 0
-    gamma = 1
+    parser = argparse.ArgumentParser(description='Deep Info Max PyTorch')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='input batch size for training (default: 32)')
+    parser.add_argument('--epochs', type=int, default=10,
+                        help='number of epochs to train (default: 10)')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='learning rate (default: 0.0001)')
+    parser.add_argument('-a', '--alpha', type=float, default=1,
+                        help='Coefficient for global DIM (default: 1)')
+    parser.add_argument('-b', '--beta', type=float, default=0,
+                        help='Coefficient for local DIM (default: 1)')
+    parser.add_argument('-g', '--gamma', type=float, default=0,
+                        help='Coefficient prior matching (default: 1)')
+    parser.add_argument('-fl', '--feature-layer', type=int, default=3,
+                        help='Layer of encoder to use for local feature M (default: 3)')
+    args = parser.parse_args()
 
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     encoder = models.Encoder(
             input_shape=(3,32,32),
-            feature_layer=3)
+            feature_layer=args.feature_layer)
 
     mi_estimator = models.MIEstimator(
-            alpha, beta, gamma, 
+            args.alpha, args.beta, args.gamma, 
             local_feature_shape=encoder.local_feature_shape,
             encoding_size=encoder.encoding_size)
 
@@ -64,11 +58,11 @@ if __name__ == "__main__":
     enc_optim = optim.Adam(encoder.parameters(), lr=1e-4)
     mi_optim = optim.Adam(mi_estimator.parameters(), lr=1e-4)
 
-    loaders = get_loaders('cifar10', batch_size=batch_size)
+    loaders = get_loaders('cifar10', batch_size=args.batch_size)
    
 
-    for epoch in range(1, epochs+1):
-        print(f'\nEpoch {epoch}/{epochs}\n' + '-' * 10)
+    for epoch in range(1, args.epochs+1):
+        print(f'\nEpoch {epoch}/{args.epochs}\n' + '-' * 10)
         
 
         total_mi_loss = total_prior_loss = 0
@@ -78,10 +72,8 @@ if __name__ == "__main__":
             encoder.train()
 
             y, M = encoder(images)
-            # Rotate along batch dimension to create M_prime
-            M_prime = torch.cat([M[1:], M[0].unsqueeze(0)], dim=0).detach()
             
-            global_loss, local_loss, prior_loss = mi_estimator(y, M, M_prime)
+            global_loss, local_loss, prior_loss = mi_estimator(y, M)
             mi_loss = global_loss + local_loss
 
             total_mi_loss += mi_loss

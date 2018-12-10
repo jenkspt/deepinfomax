@@ -5,29 +5,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-def get_features(forward_fn, loader, device=torch.device('cpu')):
-    """
-    Args:
-        forward_fn (callable): function for generating features from a batch
-            with `forward` function that returns y, M
-        loader (DataLoader): Generates batched inputs to the encoder
-    Returns:
-        features (torch.Tensor), labels (torch.Tensor)
-    """
-    assert callable(forward_fn)
-
-    with torch.set_grad_enabled(False):
-        features_lst = []
-        labels_lst = []
-        for images, labels in loader:
-            images = images.to(device) 
-
-            feat = forward_fn(images)
-            features_lst.append(feat.view(feat.size(0), -1))
-            labels_lst.append(labels)
-
-        return torch.cat(features_lst, 0), torch.cat(labels_lst, 0)
-
 
 def train_classifier(
         model,

@@ -6,6 +6,47 @@ import torch.nn as nn
 import torch.nn.functional as F
 from math import floor
 
+def get_features(forward_fn, loader, device=torch.device('cpu')):
+    """
+    Args:
+        forward_fn (callable): function for generating features from a batch
+            with `forward` function that returns y, M
+        loader (DataLoader): Generates batched inputs to the encoder
+    Returns:
+        features (torch.Tensor), labels (torch.Tensor)
+    """
+    assert callable(forward_fn)
+
+    with torch.set_grad_enabled(False):
+        features_lst = []
+        labels_lst = []
+        for images, labels in loader:
+            images = images.to(device) 
+
+            feat = forward_fn(images)
+            features_lst.append(feat.view(feat.size(0), -1))
+            labels_lst.append(labels)
+
+        return torch.cat(features_lst, 0), torch.cat(labels_lst, 0)
+
+
+def get_loaders(dataset_name='cifar10', batch_size=32):
+    if dataset_name == 'cifar10':
+        transform = Compose([
+            ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+
+        train_set = CIFAR10('data', train=True, transform=transform)
+        train_loader = DataLoader(train_set, batch_size=batch_size, 
+                shuffle=True, pin_memory=torch.cuda.is_available())
+
+        valid_set = CIFAR10('data', train=False, transform=transform)
+        valid_loader = DataLoader(valid_set, batch_size=batch_size, 
+                shuffle=False, pin_memory=torch.cuda.is_available())
+    else:
+        raise ValueError(f'{dataset_name} not implimented')
+
+    return {'train':train_loader, 'valid':valid_loader}
+
 
 def jsd_mi(positive, negative):
     """ Jenson-Shannon Divergence Mutual Information Estimation
