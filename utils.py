@@ -1,9 +1,15 @@
 
 import numpy as np
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+from torchvision.transforms import Compose, ToTensor, Normalize
+from torchvision.datasets.cifar import CIFAR10
+
 from math import floor
 
 def get_features(forward_fn, loader, device=torch.device('cpu')):
@@ -45,7 +51,7 @@ def get_loaders(dataset_name='cifar10', batch_size=32):
     else:
         raise ValueError(f'{dataset_name} not implimented')
 
-    return {'train':train_loader, 'valid':valid_loader}
+    return OrderedDict(train=train_loader, valid=valid_loader)
 
 
 def jsd_mi(positive, negative):
