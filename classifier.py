@@ -1,3 +1,7 @@
+from collections import OrderedDict
+from pathlib import Path
+import copy
+
 import torch
 import torchvision
 import torch.nn as nn
@@ -5,63 +9,72 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
+from utils import get_features
+from trainer import get_models, load_last_checkpoint
 
-def train_classifier(
-        model,
-        train_loader, 
-        epochs=5,
-        device=torch.device('cpu')):
-    
+def train_model(model, loaders, optimizer, num_epochs, device=torch.device('cpu')):
 
-    model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = float('-inf')
 
-    ce_loss = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters())
+    for epoch in range(1,num_epochs+1):
+        print(f'\nEpoch {epoch}/{num_epochs}' + '-' * 10)
 
-    model.train()
-    for epoch in range(epochs):
+        # Each epoch has a training and validation phase
+        for phase, loader in loaders.items():
+            if phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
 
-        for features, labels in train_loader:
-            features = features.to(device)
-            labels = labels.to(device)
+            running_loss = 0.0
+            running_corrects = 0
 
-            optimizer.zero_grad()
+            # Iterate over data.
+            for inputs, labels in loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
 
-            logits = model(features)
-            _, preds = torch.max(logits, 1)
-            loss = ce_loss(logits, labels)
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-            loss.backward()
-            optimizer.step()
+                # forward
+                # track history if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
 
+                    # backward + optimize only if in training phase
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
+
+                # statistics
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+
+            epoch_loss = running_loss / len(loader.dataset)
+            epoch_acc = running_corrects.double() / len(loader.dataset) 
+
+            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+
+            # deep copy the model
+            if phase != 'train' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+
+    # load best model weights
+    model.load_state_dict(best_model_wts)
     return model
 
-def eval_classifier(
-        model,
-        valid_loader,
-        device=torch.device('cpu')):
-
-    model.to(device)
-    model.eval()
-    with torch.set_grad_enabled(False):
-
-        running_corrects = 0
-        for features, labels in valid_loader:
-            features = features.to(device)
-            labels = labels.to(device)
-
-            logits = model(features)
-            _, preds = torch.max(logits, 1)
-
-            running_corrects += torch.sum(preds == labels.data)
-        acc = running_corrects.double() / len(valid_loader.dataset)
-
-    return acc
 
 def eval_encoder(
         encoder,
         loaders,
         eval_model,
+        optimizer,
         train_epochs=5,
         batch_size=128,
         feature_layer='y',
@@ -97,54 +110,55 @@ def eval_encoder(
 
     # Train classifier on encoder features
     train_features, train_labels = get_features(forward_fn, loaders['train'], device)
+    eval_features, eval_labels = get_features(forward_fn, loaders['valid'], device)
+    encoder.to('cpu')
 
     train_set = TensorDataset(train_features, train_labels)
-    train_features_loader = DataLoader(train_set, batch_size, shuffle=True)
-
-    eval_model = train_classifier(
-            eval_model, 
-            train_features_loader,
-            train_epochs,
-            device)
-
-    # Evaluate classifier
-    eval_features, eval_labels = get_features(forward_fn, loaders['valid'], device)
     eval_set = TensorDataset(eval_features, eval_labels)
+
+    train_loader = DataLoader(train_set, batch_size, shuffle=True)
     eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=False)
-    accuracy = eval_classifier(eval_model, eval_loader, device)
-    return accuracy
+
+    loaders = OrderedDict(train=train_loader, valid=eval_loader)
+
+    eval_model = train_model(eval_model, loaders, optimizer, train_epochs, device)
+
 
 if __name__ == "__main__":
     from models import Encoder
+    from utils import get_loaders
 
     # Setup 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    img_ds = TensorDataset(
-            torch.randn(16,3,32,32), 
-            torch.randint(0,10, [16], dtype=torch.long))
-    img_loader = DataLoader(img_ds)
+    epochs = 10
+    alpha, beta, gamma = 0, 1, .1
+    feature_layer = 2
+    save_dir = Path('checkpoints/dim-L')
+    
+    encoder, mi_estimator = get_models(alpha, beta, gamma, feature_layer)
+    start_epoch = load_last_checkpoint(encoder, mi_estimator, save_dir)
 
-    feat_ds = TensorDataset(
-            torch.randn(16, 64), 
-            torch.randint(0,10, [16], dtype=torch.long))
-    feat_loader = DataLoader(feat_ds)
+    loaders = get_loaders('cifar10', batch_size=128)
 
-    # Test get_features
-    encoder = Encoder(feature_layer=2)
-    encoder.eval().to(device)
-    features = get_features(lambda x: encoder(x)[0], img_loader, device)
+    encoder.to(device)
+   
+    eval_model = nn.Sequential(
+            nn.Linear(encoder.encoding_size, 200),
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(200, 10)
+        )
 
-    # Test train_classifier
-    linear_model = train_classifier(nn.Linear(64, 10), feat_loader, epochs=1, device=device)
-    # Test eval_classifier
-    acc = eval_classifier(nn.Linear(64, 10), feat_loader, device)
+    eval_model.to(device)
 
-    # Test eval_encoder
-    acc = eval_encoder(
-            encoder,
-            {'train':img_loader, 'valid':img_loader},
-            linear_model,
-            train_epochs=1,
-            batch_size=8,
+    optimizer = optim.Adam(eval_model.parameters(), 1e-4)
+
+    eval_encoder(
+            encoder, 
+            loaders,
+            eval_model,
+            optimizer,
+            train_epochs=100,
+            batch_size=128,
             device=device)
