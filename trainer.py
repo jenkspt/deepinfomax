@@ -9,26 +9,39 @@ import torch.nn.functional as F
 
 
 from importlib import reload
-from classifier import eval_encoder
+#from classifier import eval_encoder
 from utils import get_loaders
 
 import models
 
-def load_last_checkpoint(encoder, mi_estimator, dir='checkpoints/dim-G'):
+def load_last_checkpoint(
+        encoder, 
+        mi_estimator, 
+        enc_optim=None, 
+        mi_optim=None, 
+        dir='checkpoints/dim-G'):
+
     dir = Path(dir)
     checkpoint_dir = sorted(
             filter(lambda p:p.is_dir(), dir.glob('*')),
             key=lambda p:int(p.name))[-1]
+
     epoch = int(checkpoint_dir.name)
-    encoder.load_state_dict(torch.load(list(checkpoint_dir.glob('encoder*.pt'))[0]))
-    mi_estimator.load_state_dict(torch.load(list(checkpoint_dir.glob('mi_estimator*.pt'))[0]))
+    encoder.load_state_dict(torch.load(checkpoint_dir / 'encoder.pt'))
+    mi_estimator.load_state_dict(torch.load(checkpoint_dir / 'mi_estimator.pt'))
+    if enc_optim:
+        enc_optim.load_state_dict(torch.load(checkpoint_dir / 'encoder_optim.pt'))
+        mi_optim.load_state_dict(torch.load(checkpoint_dir / 'mi_optim.pt'))
+
     return epoch + 1
 
-def save_models(encoder, mi_estimator, epoch, dir):
+def save_models(encoder, mi_estimator, enc_optim, mi_optim, epoch, dir):
     ckpt_dir = Path(dir) / str(epoch)
     ckpt_dir.mkdir()
     torch.save(encoder.state_dict(), ckpt_dir / 'encoder.pt')
     torch.save(mi_estimator.state_dict(), ckpt_dir / 'mi_estimator.pt')
+    torch.save(enc_optim.state_dict(), ckpt_dir / 'encoder_optim.pt')
+    torch.save(mi_optim.state_dict(), ckpt_dir / 'mi_optim.pt')
 
 
 def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32)):
@@ -74,22 +87,29 @@ if __name__ == "__main__":
     encoder, mi_estimator = get_models(
             args.alpha, args.beta, args.gamma, args.feature_layer)
 
+    encoder.to(device)
+    mi_estimator.to(device)
+
+    enc_optim = optim.Adam(encoder.parameters(), lr=args.lr)
+    mi_optim = optim.Adam(mi_estimator.parameters(), lr=args.lr)
+
     if args.resume:
         # Loads in-place
-        start_epoch = load_last_checkpoint(encoder, mi_estimator, save_dir)
+        start_epoch = load_last_checkpoint(
+                encoder, 
+                mi_estimator, 
+                enc_optim,
+                mi_optim,
+                save_dir)
     else:
         start_epoch = 0
         save_dir.mkdir()
 
-    encoder.to(device)
-    mi_estimator.to(device)
 
-    enc_optim = optim.Adam(encoder.parameters(), lr=1e-4)
-    mi_optim = optim.Adam(mi_estimator.parameters(), lr=1e-4)
 
     loaders = get_loaders('cifar10', batch_size=args.batch_size)
    
-    for epoch in range(start_epoch, start_epoch + args.epochs + 1):
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         print(f'\nEpoch {epoch}/{start_epoch + args.epochs}\n' + '-' * 10)
 
         for phase, loader in loaders.items():
@@ -103,7 +123,7 @@ if __name__ == "__main__":
 
             total_mi_loss = total_prior_loss = 0
 
-            for i, (images, labels) in enumerate(loader):
+            for images, labels) in loader:
                 images = images.to(device) 
                 with torch.set_grad_enabled(phase == 'train'):
                     y, M = encoder(images)
@@ -136,7 +156,7 @@ if __name__ == "__main__":
             print(f'{phase} MI loss: {epoch_mi_loss:.4f}, ', end='')
             print(f'Prior loss: {epoch_prior_loss:.4f}')
 
-        save_models(encoder, mi_estimator, epoch, save_dir)
+        save_models(encoder, mi_estimator, enc_optim, mi_optim, epoch, save_dir)
 
         """
         if epoch % 10 == 0:
