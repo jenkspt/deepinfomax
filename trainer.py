@@ -79,7 +79,7 @@ def remove_checkpoints(save_dir, keep_num=5):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Deep Info Max PyTorch')
-    parser.add_argument('--batch-size', type=int, default=64,
+    parser.add_argument('--batch-size', type=int, default=32+8,
                         help='input batch size for training (default: 64)')
     parser.add_argument('--epochs', type=int, default=10,
                         help='number of epochs to train (default: 10)')
@@ -105,8 +105,6 @@ if __name__ == "__main__":
 
     save_dir = Path('checkpoints') / args.model_name
 
-    loggers = {'train':Tensorboard(str(save_dir / 'train')), 
-            'valid':Tensorboard(str(save_dir / 'valid'))}
 
     # Creates nn.Modules
     encoder, mi_estimator = get_models(
@@ -131,6 +129,8 @@ if __name__ == "__main__":
         start_epoch = 0
         save_dir.mkdir()
 
+    loggers = {'train':Tensorboard(str(save_dir / 'train')), 
+            'valid':Tensorboard(str(save_dir / 'valid'))}
 
 
     loaders = get_loaders('cifar10', batch_size=args.batch_size)
