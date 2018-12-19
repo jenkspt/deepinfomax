@@ -214,19 +214,23 @@ class MIEstimator(nn.Module):
         # Number of negative samples doesn't have a large effect 
         # on JSD MI (implemented as BCE), so 1 negative sample is used
         # Rotate along batch dimension to create M_prime
-        M_prime = torch.cat([M[1:], M[0].unsqueeze(0)], dim=0).detach()
+        M_prime = [torch.cat([M[i:], M[:i]], 0).detach() for i in range(len(M)-1)]
         
         # Global MI loss
         if not self.global_disc is None:
             positive = self.global_disc(y, M)
-            negative = self.global_disc(y, M_prime)
+            
+            negative = torch.mean(torch.stack([self.global_dic(y, Mp) for Mp in M_prime]))
+            #negative = self.global_disc(y, M_prime)
             global_loss = self.alpha * mi_bce_loss(positive, negative)
 
         # Local MI loss
         if not self.local_disc is None:
             lH, lW = M.shape[2:]
             positive = self.local_disc(y, M)
-            negative = self.local_disc(y, M_prime)
+
+            negative = torch.mean(torch.stack([self.local_disc(y, Mp) for Mp in M_prime]))
+            #negative = self.local_disc(y, M_prime)
             local_loss = self.beta * mi_bce_loss(positive, negative)/(lH*lW)
 
         # Prior (discriminator) loss
