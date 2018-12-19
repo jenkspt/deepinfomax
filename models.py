@@ -62,6 +62,12 @@ class Encoder(nn.Module):
             )
         self.linear = nn.Linear(1024, self.encoding_size, bias=True)
 
+    def conv(x):
+        return self.C(self.f0(x))
+
+    def fc(x):
+        return self.f1(self.conv(x))
+
     def forward(self, x):
         M = self.C(x)                               # Local feature
         conv = self.f0(M)                           # Last conv Layer
@@ -201,9 +207,14 @@ class MIEstimator(nn.Module):
         # DIM Hyperparameters
         self.alpha, self.beta, self.gamma = alpha, beta, gamma
 
-    def forward(self, y, M, M_prime):
+    def forward(self, y, M):
         # Default values if loss isn't used
         global_loss = local_loss = prior_loss = 0.
+
+        # Number of negative samples doesn't have a large effect 
+        # on JSD MI (implemented as BCE), so 1 negative sample is used
+        # Rotate along batch dimension to create M_prime
+        M_prime = torch.cat([M[1:], M[0].unsqueeze(0)], dim=0).detach()
         
         # Global MI loss
         if not self.global_disc is None:

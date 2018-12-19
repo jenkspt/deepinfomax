@@ -1,12 +1,14 @@
 import numpy as np
 import argparse
 from pathlib import Path
+import os
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+from tensorboard import Tensorboard
 
 from importlib import reload
 #from classifier import eval_encoder
@@ -14,34 +16,44 @@ from utils import get_loaders
 
 import models
 
-def load_last_checkpoint(
-        encoder, 
-        mi_estimator, 
-        enc_optim=None, 
-        mi_optim=None, 
-        dir='checkpoints/dim-G'):
+def load_checkpoint(models, save_dir, epoch=None):
+    """
+    Args:
+        models (dict[str, nn.Module]): Subset of models used in save_checkpoint
+        save_dir (str or Path): Parent directory where checkpoints are saved
+        epoch (int): Epoch of checkpoit to load. If not provided, loads latest checkpoint
+    """
+    
+    key = lambda p: int(p.name.split('_')[1].split('-')[1])  # Get epoch from filename
+    ckpt_paths = {key(p):p for p in save_dir.glob('ckpt*.tar')}
 
-    dir = Path(dir)
-    checkpoint_dir = sorted(
-            filter(lambda p:p.is_dir(), dir.glob('*')),
-            key=lambda p:int(p.name))[-1]
+    epoch = epoch if epoch else sorted(ckpt_paths.keys())[-1]
+    ckpt_path = ckpt_paths[epoch]
 
-    epoch = int(checkpoint_dir.name)
-    encoder.load_state_dict(torch.load(checkpoint_dir / 'encoder.pt'))
-    mi_estimator.load_state_dict(torch.load(checkpoint_dir / 'mi_estimator.pt'))
-    if enc_optim:
-        enc_optim.load_state_dict(torch.load(checkpoint_dir / 'encoder_optim.pt'))
-        mi_optim.load_state_dict(torch.load(checkpoint_dir / 'mi_optim.pt'))
+    ckpt = torch.load(ckpt_path)
 
-    return epoch + 1
+    for key, model in models.items():
+        model.load_state_dict(ckpt[key])
 
-def save_models(encoder, mi_estimator, enc_optim, mi_optim, epoch, dir):
-    ckpt_dir = Path(dir) / str(epoch)
-    ckpt_dir.mkdir()
-    torch.save(encoder.state_dict(), ckpt_dir / 'encoder.pt')
-    torch.save(mi_estimator.state_dict(), ckpt_dir / 'mi_estimator.pt')
-    torch.save(enc_optim.state_dict(), ckpt_dir / 'encoder_optim.pt')
-    torch.save(mi_optim.state_dict(), ckpt_dir / 'mi_optim.pt')
+    return epoch
+
+
+def save_checkpoint(models, save_dir, epoch, loss):
+    """
+    Args:
+        models (dict[str, nn.Module]): Dictionary of models to save
+        save_dir (Path): Directory to save checkpoint in
+        epoch (int): Current epoch
+        loss (float): Current loss
+    """
+
+    save_dir = Path(save_dir)
+    assert save_dir.is_dir()
+
+    torch.save({
+        **{key:model.state_dict() for key, model in models.items()},
+        'epoch': epoch,
+        'loss': loss}, save_dir / f'ckpt_epoch-{epoch}_loss-{loss:.4f}.tar')
 
 
 def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32)):
@@ -55,6 +67,15 @@ def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32)):
             encoding_size=encoder.encoding_size)
 
     return encoder, mi_estimator
+
+def remove_checkpoints(save_dir, keep_num=5):
+    save_dir = Path(save_dir)
+    key = lambda p: int(p.name.split('_')[1].split('-')[1])  # Get epoch from filename
+    ckpts = sorted(save_dir.glob('ckpt*.tar'), key=key)[:-keep_num]
+    for ckpt in ckpts:
+        os.remove(ckpt)
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Deep Info Max PyTorch')
@@ -81,7 +102,11 @@ if __name__ == "__main__":
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     NUM_CLASSES = 10
+
     save_dir = Path('checkpoints') / args.model_name
+
+    loggers = {'train':Tensorboard(str(save_dir / 'train')), 
+            'valid':Tensorboard(str(save_dir / 'valid'))}
 
     # Creates nn.Modules
     encoder, mi_estimator = get_models(
@@ -93,14 +118,15 @@ if __name__ == "__main__":
     enc_optim = optim.Adam(encoder.parameters(), lr=args.lr)
     mi_optim = optim.Adam(mi_estimator.parameters(), lr=args.lr)
 
+    models = {
+            'encoder':encoder,
+            'mi_estimator':mi_estimator,
+            'encoder_optimizer':enc_optim,
+            'mi_optimizer':mi_optim}
+
     if args.resume:
         # Loads in-place
-        start_epoch = load_last_checkpoint(
-                encoder, 
-                mi_estimator, 
-                enc_optim,
-                mi_optim,
-                save_dir)
+        start_epoch = load_checkpoint(models, save_dir)
     else:
         start_epoch = 0
         save_dir.mkdir()
@@ -109,7 +135,7 @@ if __name__ == "__main__":
 
     loaders = get_loaders('cifar10', batch_size=args.batch_size)
    
-    for epoch in range(start_epoch, start_epoch + args.epochs):
+    for epoch in range(start_epoch+1, start_epoch + args.epochs+1):
         print(f'\nEpoch {epoch}/{start_epoch + args.epochs}\n' + '-' * 10)
 
         for phase, loader in loaders.items():
@@ -123,7 +149,7 @@ if __name__ == "__main__":
 
             total_mi_loss = total_prior_loss = 0
 
-            for images, labels) in loader:
+            for images, labels in loader:
                 images = images.to(device) 
                 with torch.set_grad_enabled(phase == 'train'):
                     y, M = encoder(images)
@@ -156,27 +182,8 @@ if __name__ == "__main__":
             print(f'{phase} MI loss: {epoch_mi_loss:.4f}, ', end='')
             print(f'Prior loss: {epoch_prior_loss:.4f}')
 
-        save_models(encoder, mi_estimator, enc_optim, mi_optim, epoch, save_dir)
+            loggers[phase].log_scalar('MI-loss', epoch_mi_loss, epoch)
+            loggers[phase].log_scalar('Prior-loss', prior_loss, epoch)
 
-        """
-        if epoch % 10 == 0:
-            eval_model = nn.Sequential(
-                    nn.Linear(encoder.encoding_size, 200),
-                    nn.ReLU(),
-                    nn.Dropout(),
-                    nn.Linear(200, NUM_CLASSES)
-                )
-            eval_model.to(device)
-            eval_optimizer = optim.Adam(eval_model.parameters(), 1e-4/2)
-            acc = eval_encoder(
-                    encoder, 
-                    loaders,
-                    eval_model,
-                    eval_optimizer,
-                    train_epochs=50,
-                    batch_size=64,
-                    device=device)
-
-            print(f'2-layer classifier accuracy: {acc:.2f}')
-            torch.save(encoder.state_dict(), f'saved_models/encoder-L-{epoch}.pt')
-        """
+        save_checkpoint(models, save_dir, epoch, mi_loss)
+        remove_checkpoints(save_dir, keep_num=10)

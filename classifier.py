@@ -10,16 +10,22 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from utils import get_features
-from trainer import get_models, load_last_checkpoint
+from trainer import get_models, load_checkpoint
 
-def train_model(model, loaders, optimizer, num_epochs, device=torch.device('cpu')):
+def train_model(
+        model,
+        loaders,
+        optimizer,
+        scheduler,
+        num_epochs,
+        device=torch.device('cpu')):
 
     criterion = nn.CrossEntropyLoss()
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = float('-inf')
 
     for epoch in range(1,num_epochs+1):
-        print(f'\nEpoch {epoch}/{num_epochs}' + '-' * 10)
+        print(f'\nEpoch {epoch}/{num_epochs}\n' + '-' * 10)
 
         # Each epoch has a training and validation phase
         for phase, loader in loaders.items():
@@ -32,7 +38,7 @@ def train_model(model, loaders, optimizer, num_epochs, device=torch.device('cpu'
             running_corrects = 0
 
             # Iterate over data.
-            for inputs, labels in loader:
+            for i, (inputs, labels) in enumerate(loader):
                 inputs = inputs.to(device)
                 labels = labels.to(device)
 
@@ -53,17 +59,23 @@ def train_model(model, loaders, optimizer, num_epochs, device=torch.device('cpu'
 
                 # statistics
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
+                correct = torch.sum(preds == labels.data)
+                running_corrects += correct
+                if i%10 == 0 and False:
+                    print(f'\tIter {i} Loss: {loss}, Acc: {correct/len(labels)}')
 
             epoch_loss = running_loss / len(loader.dataset)
             epoch_acc = running_corrects.double() / len(loader.dataset) 
 
-            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}, ', end='')
+            print(f'LR: {scheduler.get_lr()[0]:.6f}')
 
             # deep copy the model
             if phase != 'train' and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
+
+        scheduler.step()
 
     # load best model weights
     model.load_state_dict(best_model_wts)
@@ -75,6 +87,7 @@ def eval_encoder(
         loaders,
         eval_model,
         optimizer,
+        scheduler,
         train_epochs=5,
         batch_size=128,
         feature_layer='y',
@@ -121,7 +134,7 @@ def eval_encoder(
 
     loaders = OrderedDict(train=train_loader, valid=eval_loader)
 
-    eval_model = train_model(eval_model, loaders, optimizer, train_epochs, device)
+    eval_model = train_model(eval_model, loaders, optimizer, scheduler, train_epochs, device)
 
 
 if __name__ == "__main__":
@@ -131,13 +144,13 @@ if __name__ == "__main__":
     # Setup 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    epochs = 10
     alpha, beta, gamma = 0, 1, .1
     feature_layer = 2
     save_dir = Path('checkpoints/dim-L')
     
     encoder, mi_estimator = get_models(alpha, beta, gamma, feature_layer)
-    start_epoch = load_last_checkpoint(encoder, mi_estimator, save_dir)
+
+    start_epoch = load_checkpoint({'encoder':encoder}, save_dir)
 
     loaders = get_loaders('cifar10', batch_size=128)
 
@@ -146,19 +159,23 @@ if __name__ == "__main__":
     eval_model = nn.Sequential(
             nn.Linear(encoder.encoding_size, 200),
             nn.ReLU(),
-            nn.Dropout(),
+            nn.Dropout(.4),
             nn.Linear(200, 10)
         )
 
     eval_model.to(device)
 
-    optimizer = optim.Adam(eval_model.parameters(), 1e-4)
+    #optimizer = optim.Adam(eval_model.parameters(), 1e-4)
+    optimizer = optim.SGD(eval_model.parameters(), 0.012, momentum=.9)
+    #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [7,50], gamma=0.5)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=.999)
 
     eval_encoder(
             encoder, 
             loaders,
             eval_model,
             optimizer,
-            train_epochs=100,
+            scheduler=scheduler,
+            train_epochs=300,
             batch_size=128,
             device=device)

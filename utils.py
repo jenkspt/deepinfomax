@@ -1,6 +1,7 @@
 
 import numpy as np
 from collections import OrderedDict
+from multiprocessing import cpu_count
 
 import torch
 import torch.nn as nn
@@ -42,12 +43,19 @@ def get_loaders(dataset_name='cifar10', batch_size=32):
             ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
         train_set = CIFAR10('data', train=True, transform=transform)
-        train_loader = DataLoader(train_set, batch_size=batch_size, 
-                shuffle=True, pin_memory=torch.cuda.is_available())
+        train_loader = DataLoader(
+                train_set, 
+                batch_size=batch_size, 
+                shuffle=True, 
+                num_workers=cpu_count(), 
+                pin_memory=torch.cuda.is_available())
 
         valid_set = CIFAR10('data', train=False, transform=transform)
-        valid_loader = DataLoader(valid_set, batch_size=batch_size, 
-                shuffle=False, pin_memory=torch.cuda.is_available())
+        valid_loader = DataLoader(
+                valid_set, 
+                batch_size=batch_size, 
+                shuffle=False, 
+                num_workers=cpu_count())
     else:
         raise ValueError(f'{dataset_name} not implimented')
 
