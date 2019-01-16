@@ -56,7 +56,7 @@ def save_checkpoint(models, save_dir, epoch, loss):
         'loss': loss}, save_dir / f'ckpt_epoch-{epoch}_loss-{loss:.4f}.tar')
 
 
-def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32)):
+def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32), num_negative=2):
     encoder = models.Encoder(
             input_shape=input_shape,
             feature_layer=feature_layer)
@@ -64,7 +64,8 @@ def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32)):
     mi_estimator = models.MIEstimator(
             alpha, beta, gamma, 
             local_feature_shape=encoder.local_feature_shape,
-            encoding_size=encoder.encoding_size)
+            encoding_size=encoder.encoding_size,
+            num_negative=num_negative)
 
     return encoder, mi_estimator
 
@@ -79,8 +80,10 @@ def remove_checkpoints(save_dir, keep_num=5):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Deep Info Max PyTorch')
-    parser.add_argument('--batch-size', type=int, default=32+8,
+    parser.add_argument('--batch-size', type=int, default=32+16,
                         help='input batch size for training (default: 64)')
+    parser.add_argument('--num-negative', type=int, default=1,
+                        help='Number of negative examples to use per positive (default: 1)')
     parser.add_argument('--epochs', type=int, default=10,
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=1e-4,
@@ -98,6 +101,7 @@ if __name__ == "__main__":
     parser.add_argument('--resume', default=False, action='store_true')
 
     args = parser.parse_args()
+    print(args)
 
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -108,7 +112,8 @@ if __name__ == "__main__":
 
     # Creates nn.Modules
     encoder, mi_estimator = get_models(
-            args.alpha, args.beta, args.gamma, args.feature_layer)
+            args.alpha, args.beta, args.gamma, args.feature_layer,
+            num_negative=args.num_negative)
 
     encoder.to(device)
     mi_estimator.to(device)

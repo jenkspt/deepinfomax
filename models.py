@@ -123,6 +123,18 @@ class ConcatAndConvDIM(nn.Module):
         # Convolve
         return self.sequential(x)
 
+class BlockLayerNorm(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.num_features = num_features
+
+        self.layer_norm = nn.LayerNorm(num_features)
+
+    def forward(self, inputs):
+        x = inputs.permute(0,2,3,1)
+        x = self.layer_norm(x)
+        return x.permute(0,3,1,2)
+
 class EncodeAndDotDIM(nn.Module):
     """ Encode and Dot Architecture """
     def __init__(self,
@@ -136,6 +148,7 @@ class EncodeAndDotDIM(nn.Module):
         # Global encoder
         self.G1 = nn.Sequential(
                 nn.Linear(encoding_size, 2048),
+                nn.BatchNorm1d(2048),
                 nn.ReLU(),
                 nn.Linear(2048, 2048)
             )
@@ -145,10 +158,12 @@ class EncodeAndDotDIM(nn.Module):
             )
 
         # Local encoder
+        self.block_layer_norm = BlockLayerNorm(2048)
         self.L1 = nn.Sequential(
-                nn.Conv2d(lC, 2048, 1),
+                nn.Conv2d(lC, 2048, 1, bias=False),
+                nn.BatchNorm2d(2048),
                 nn.ReLU(),
-                nn.Conv2d(2048, 2048, 1)
+                nn.Conv2d(2048, 2048, 1, bias=True)
             )
 
         self.L2 = nn.Sequential(
@@ -158,7 +173,7 @@ class EncodeAndDotDIM(nn.Module):
 
     def forward(self, y, M):
         g = self.G1(y) + self.G2(y)
-        l = self.L1(M) + self.L2(M)
+        l = self.block_layer_norm(self.L1(M) + self.L2(M))
 
         # broadcast over channel dimension
         g = g.view(g.size(0), g.size(1), 1, 1)
@@ -170,9 +185,11 @@ class PriorMatch(nn.Module):
     def __init__(self, in_features):
         super().__init__()
         self.sequential = nn.Sequential(
-                nn.Linear(in_features, 1000),
+                nn.Linear(in_features, 1000, bias=False),
+                nn.BatchNorm1d(1000),
                 nn.ReLU(),
-                nn.Linear(1000, 200),
+                nn.Linear(1000, 200, bias=False),
+                nn.BatchNorm1d(200),
                 nn.ReLU(),
                 nn.Linear(200, 1)
             )
@@ -186,11 +203,17 @@ class MIEstimator(nn.Module):
             alpha, beta, gamma, 
             encoding_size=64, 
             local_feature_shape=(128, 8, 8),
-            encode_and_dot=True):
+            encode_and_dot=True,
+            num_negative=2):
 
         super().__init__()
 
         args = (encoding_size, local_feature_shape)
+        # Number of negative samples
+        if num_negative < 1:
+            raise ValueError(f"Arg num_negative with value {num_negative} should be >= 1")
+        self.num_negative = num_negative
+
         # Don't waste resources if hyperparameters are set to zero
         self.global_disc = GlobalDIM(*args) if alpha > 0 else None
 
@@ -208,19 +231,30 @@ class MIEstimator(nn.Module):
         self.alpha, self.beta, self.gamma = alpha, beta, gamma
 
     def forward(self, y, M):
+        """
+        Args:
+            y (torch.Tensor): Global encoding output of Encoder
+            M (torch.Tensor): Local encoding output of Encoder
+        """
+
         # Default values if loss isn't used
         global_loss = local_loss = prior_loss = 0.
 
         # Number of negative samples doesn't have a large effect 
         # on JSD MI (implemented as BCE), so 1 negative sample is used
         # Rotate along batch dimension to create M_prime
-        M_prime = [torch.cat([M[i:], M[:i]], 0).detach() for i in range(len(M)-1)]
+        #M_prime = [torch.cat([M[i:], M[:i]], 0).detach() for i in range(len(M)-1)]
+        # Negative index selection
+        n = M.size(0)
+        idx = list(range(n))
+        neg_idx = [(idx[i+1:] + idx[:i])[:self.num_negative] for i in range(n)]
+        M_prime = M[neg_idx, ...]   # Shape is [batch_size, batch_size-1, C, H, W]
         
         # Global MI loss
         if not self.global_disc is None:
             positive = self.global_disc(y, M)
-            
-            negative = torch.mean(torch.stack([self.global_dic(y, Mp) for Mp in M_prime]))
+            negative = torch.mean(torch.stack(
+                [self.global_disc(y, M_prime[:,i]) for i in range(self.num_negative)]))
             #negative = self.global_disc(y, M_prime)
             global_loss = self.alpha * mi_bce_loss(positive, negative)
 
@@ -228,8 +262,8 @@ class MIEstimator(nn.Module):
         if not self.local_disc is None:
             lH, lW = M.shape[2:]
             positive = self.local_disc(y, M)
-
-            negative = torch.mean(torch.stack([self.local_disc(y, Mp) for Mp in M_prime]))
+            negative = torch.mean(torch.stack(
+                [self.local_disc(y, M_prime[:,i]) for i in range(self.num_negative)]))
             #negative = self.local_disc(y, M_prime)
             local_loss = self.beta * mi_bce_loss(positive, negative)/(lH*lW)
 
@@ -237,7 +271,7 @@ class MIEstimator(nn.Module):
         if not self.prior_disc is None:
             prior_sample = torch.rand_like(y)
             positive = self.prior_disc(prior_sample)
-            negative = self.prior_disc(y)
+            negative = self.prior_disc(torch.sigmoid(y))
             prior_loss = self.gamma * mi_bce_loss(positive, negative)
 
         return global_loss, local_loss, prior_loss
