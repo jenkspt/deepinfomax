@@ -1,3 +1,4 @@
+import argparse
 from collections import OrderedDict
 from pathlib import Path
 import copy
@@ -10,7 +11,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from utils import get_features
-from trainer import get_models, load_checkpoint
+from trainer import get_dim, load_checkpoint
 
 def train_model(
         model,
@@ -141,34 +142,66 @@ if __name__ == "__main__":
     from models import Encoder
     from utils import get_loaders
 
+    parser = argparse.ArgumentParser(description='Deep Info Max Classifier')
+
+    parser.add_argument('-a', '--alpha', type=float, default=1,
+                        help='Same as for model being evaluated')
+    parser.add_argument('-b', '--beta', type=float, default=0,
+                        help='Same as for model being evaluated')
+    parser.add_argument('-g', '--gamma', type=float, default=1,
+                        help='Same as for model being evaluated')
+    parser.add_argument('-fl', '--feature-layer', type=int, default=3,
+                        help='Layer of encoder to use for local feature M (default: 3)')
+    parser.add_argument('--batch-size', type=int, default=128,
+                        help='input batch size for training (default: 64)')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='number of epochs to train (default: 10)')
+    parser.add_argument('--lr', type=float, default=1e-3,
+                        help='learning rate (default: 0.0001)')
+    parser.add_argument('--lr-decay', type=float, default=1,
+                        help='learning rate decay default=1')
+    parser.add_argument('--dropout', type=float, default=0.1,
+                        help='dropout rate (default: 0.1)')
+    parser.add_argument('--model-name', type=str, default='dim-G',
+            help='Checkpoint directory name')
+    parser.add_argument('--model-epoch', type=int, default=None,
+            help='Model epoch to evaluate, default is latest epoch')
+    args = parser.parse_args()
+
+
+
     # Setup 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    alpha, beta, gamma = 0, 1, .1
-    feature_layer = 2
-    save_dir = Path('checkpoints/dim-L')
-    
-    encoder, mi_estimator = get_models(alpha, beta, gamma, feature_layer)
+    alpha, beta, gamma = args.alpha, args.beta, args.gamma
+    feature_layer = args.feature_layer
 
-    start_epoch = load_checkpoint({'encoder':encoder}, save_dir)
+    save_dir = Path('checkpoints') / args.model_name
+    assert save_dir.is_dir()
+    
+    #encoder, mi_estimator = get_models(alpha, beta, gamma, feature_layer)
+    dim = get_dim(alpha, beta, gamma, feature_layer)
+
+    start_epoch = load_checkpoint({'dim':dim}, save_dir, args.model_epoch)
 
     loaders = get_loaders('cifar10', batch_size=128)
-
+    encoder = dim.encoder
     encoder.to(device)
    
     eval_model = nn.Sequential(
             nn.Linear(encoder.encoding_size, 200),
+            nn.BatchNorm1d(200),
             nn.ReLU(),
-            nn.Dropout(.4),
+            nn.Dropout(args.dropout),
             nn.Linear(200, 10)
         )
 
     eval_model.to(device)
 
-    #optimizer = optim.Adam(eval_model.parameters(), 1e-4)
-    optimizer = optim.SGD(eval_model.parameters(), 0.012, momentum=.9)
+    optimizer = optim.Adam(eval_model.parameters(), args.lr)
+    #optimizer = optim.SGD(eval_model.parameters(), args.lr, momentum=.9)
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [7,50], gamma=0.5)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=.999)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.lr_decay)
 
     eval_encoder(
             encoder, 
@@ -176,6 +209,6 @@ if __name__ == "__main__":
             eval_model,
             optimizer,
             scheduler=scheduler,
-            train_epochs=300,
-            batch_size=128,
+            train_epochs=args.epochs,
+            batch_size=args.batch_size,
             device=device)

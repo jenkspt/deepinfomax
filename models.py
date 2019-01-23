@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import conv_output_size, mi_bce_loss
+from utils import get_positive_expectation, get_negative_expectation
 
 
 class ConvLayer(nn.Module):
@@ -175,9 +176,14 @@ class EncodeAndDotDIM(nn.Module):
         g = self.G1(y) + self.G2(y)
         l = self.block_layer_norm(self.L1(M) + self.L2(M))
 
-        # broadcast over channel dimension
-        g = g.view(g.size(0), g.size(1), 1, 1)
-        return (g * l).sum(1)
+        n, c, h, w = l.shape
+        l = l.view(n, c, -1)
+        l = l.permute(0, 2, 1)
+        l = l.reshape(-1, c)
+        
+        u = torch.mm(g, l.t())
+        u = u.reshape(n, n, -1)
+        return u
 
 
 
@@ -198,21 +204,23 @@ class PriorMatch(nn.Module):
         return self.sequential(x)
 
 
-class MIEstimator(nn.Module):
+class DIM(nn.Module):
     def __init__(self, 
-            alpha, beta, gamma, 
-            encoding_size=64, 
-            local_feature_shape=(128, 8, 8),
+            alpha, beta, gamma,
+            encoder,
             encode_and_dot=True,
             num_negative=2):
 
         super().__init__()
 
-        args = (encoding_size, local_feature_shape)
+        #args = (encoding_size, local_feature_shape)
+        args = (encoder.encoding_size, encoder.local_feature_shape)
         # Number of negative samples
         if num_negative < 1:
             raise ValueError(f"Arg num_negative with value {num_negative} should be >= 1")
         self.num_negative = num_negative
+
+        self.encoder = encoder
 
         # Don't waste resources if hyperparameters are set to zero
         self.global_disc = GlobalDIM(*args) if alpha > 0 else None
@@ -222,23 +230,23 @@ class MIEstimator(nn.Module):
         else:
             self.local_disc = ConcatAndConvDIM(*args) if beta > 0 else None
 
-        self.prior_disc = PriorMatch(encoding_size) if gamma > 0 else None
-
         # Distributions won't move to GPU
         #self.prior = Uniform(torch.cuda.FloatTensor(0), torch.cuda.FloatTensor(1))
+
+        self.prior_disc = PriorMatch(encoder.encoding_size) if gamma > 0 else None
 
         # DIM Hyperparameters
         self.alpha, self.beta, self.gamma = alpha, beta, gamma
 
-    def forward(self, y, M):
+    def forward(self, inputs):
         """
         Args:
             y (torch.Tensor): Global encoding output of Encoder
             M (torch.Tensor): Local encoding output of Encoder
         """
-
+        y, M = self.encoder(inputs)
         # Default values if loss isn't used
-        global_loss = local_loss = prior_loss = 0.
+        global_loss = local_loss = 0.
 
         # Number of negative samples doesn't have a large effect 
         # on JSD MI (implemented as BCE), so 1 negative sample is used
@@ -260,12 +268,21 @@ class MIEstimator(nn.Module):
 
         # Local MI loss
         if not self.local_disc is None:
+            """
             lH, lW = M.shape[2:]
             positive = self.local_disc(y, M)
             negative = torch.mean(torch.stack(
                 [self.local_disc(y, M_prime[:,i]) for i in range(self.num_negative)]))
             #negative = self.local_disc(y, M_prime)
             local_loss = self.beta * mi_bce_loss(positive, negative)/(lH*lW)
+            """
+            u = self.local_disc(y, M)
+            E_pos = get_positive_expectation(u).mean(2)
+            E_pos = E_pos[range(n), range(n)].mean()
+
+            E_neg = get_negative_expectation(u).mean(2)
+            E_neg = E_neg[1-torch.eye(n, dtype=torch.uint8)].mean()
+            local_loss = E_neg - E_pos
 
         # Prior (discriminator) loss
         if not self.prior_disc is None:
@@ -274,7 +291,7 @@ class MIEstimator(nn.Module):
             negative = self.prior_disc(torch.sigmoid(y))
             prior_loss = self.gamma * mi_bce_loss(positive, negative)
 
-        return global_loss, local_loss, prior_loss
+        return global_loss + local_loss, prior_loss
 
 
 if __name__ == "__main__":

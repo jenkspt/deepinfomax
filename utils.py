@@ -1,4 +1,4 @@
-
+import math
 import numpy as np
 from collections import OrderedDict
 from multiprocessing import cpu_count
@@ -46,7 +46,8 @@ def get_loaders(dataset_name='cifar10', batch_size=32):
         train_loader = DataLoader(
                 train_set, 
                 batch_size=batch_size, 
-                shuffle=True, 
+                shuffle=True,
+                drop_last=True,
                 num_workers=cpu_count(), 
                 pin_memory=torch.cuda.is_available())
 
@@ -54,13 +55,21 @@ def get_loaders(dataset_name='cifar10', batch_size=32):
         valid_loader = DataLoader(
                 valid_set, 
                 batch_size=batch_size, 
-                shuffle=False, 
+                shuffle=False,
+                drop_last=True,
                 num_workers=cpu_count())
     else:
         raise ValueError(f'{dataset_name} not implimented')
 
     return OrderedDict(train=train_loader, valid=valid_loader)
 
+def get_positive_expectation(p_samples):
+    log_2 = math.log(2.)
+    return log_2 - F.softplus(- p_samples)
+
+def get_negative_expectation(q_samples):
+    log_2 = math.log(2.)
+    return F.softplus(-q_samples) + q_samples - log_2
 
 def jsd_mi(positive, negative):
     """ Jenson-Shannon Divergence Mutual Information Estimation

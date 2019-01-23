@@ -56,18 +56,14 @@ def save_checkpoint(models, save_dir, epoch, loss):
         'loss': loss}, save_dir / f'ckpt_epoch-{epoch}_loss-{loss:.4f}.tar')
 
 
-def get_models(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32), num_negative=2):
+def get_dim(alpha, beta, gamma, feature_layer=2, input_shape=(3,32,32), num_negative=2):
+
     encoder = models.Encoder(
             input_shape=input_shape,
             feature_layer=feature_layer)
 
-    mi_estimator = models.MIEstimator(
-            alpha, beta, gamma, 
-            local_feature_shape=encoder.local_feature_shape,
-            encoding_size=encoder.encoding_size,
-            num_negative=num_negative)
-
-    return encoder, mi_estimator
+    dim = models.DIM(alpha, beta, gamma, encoder, num_negative=num_negative)
+    return dim
 
 def remove_checkpoints(save_dir, keep_num=5):
     save_dir = Path(save_dir)
@@ -111,21 +107,26 @@ if __name__ == "__main__":
 
 
     # Creates nn.Modules
-    encoder, mi_estimator = get_models(
-            args.alpha, args.beta, args.gamma, args.feature_layer,
+    dim = get_dim(
+            args.alpha, 
+            args.beta, 
+            args.gamma, 
+            args.feature_layer, 
             num_negative=args.num_negative)
+    
+    dim.to(device)
+    
+    mi_params = list(dim.encoder.parameters())
+    mi_params += list(dim.global_disc.parameters()) if dim.global_disc else []
+    mi_params += list(dim.local_disc.parameters()) if dim.local_disc else []
+    mi_optim = optim.Adam(mi_params, args.lr)
 
-    encoder.to(device)
-    mi_estimator.to(device)
-
-    enc_optim = optim.Adam(encoder.parameters(), lr=args.lr)
-    mi_optim = optim.Adam(mi_estimator.parameters(), lr=args.lr)
+    prior_optim = optim.Adam(dim.prior_disc.parameters(), args.lr)
 
     models = {
-            'encoder':encoder,
-            'mi_estimator':mi_estimator,
-            'encoder_optimizer':enc_optim,
-            'mi_optimizer':mi_optim}
+            'dim': dim,
+            'mi_optimizer': mi_optim,
+            'prior_optimizer': prior_optim}
 
     if args.resume:
         # Loads in-place
@@ -145,47 +146,39 @@ if __name__ == "__main__":
 
         for phase, loader in loaders.items():
             if phase == 'train':
-                encoder.train()
-                mi_estimator.train()
+                dim.train()
             else:
-                encoder.eval()
-                mi_estimator.eval()
-        
+                dim.eval()
 
             total_mi_loss = total_prior_loss = 0
 
             for images, labels in loader:
                 images = images.to(device) 
                 with torch.set_grad_enabled(phase == 'train'):
-                    y, M = encoder(images)
-                    
-                    global_loss, local_loss, prior_loss = mi_estimator(y, M)
-                    mi_loss = global_loss + local_loss
-
-                    total_mi_loss += mi_loss
-                    total_prior_loss += prior_loss
-                    
-                    # Optimize encoder
-                    enc_optim.zero_grad()
-                    encoder_loss = mi_loss - prior_loss 
-                    if phase == 'train':
-                        encoder_loss.backward(retain_graph=True)
-                        enc_optim.step()
-
 
                     mi_optim.zero_grad()
-                    # Optimize mutual information estimator
-                    mi_est_loss = mi_loss + prior_loss
+                    prior_optim.zero_grad()
+
+                    mi_loss, prior_loss = dim(images)
+                    # Optimize encoder
                     if phase == 'train':
-                        mi_est_loss.backward()
+
+                        (mi_loss - prior_loss).backward(retain_graph=True)
                         mi_optim.step()
+
+                        prior_loss.backward()
+                        prior_optim.step()
+
+                    total_mi_loss += mi_loss.item()
+                    total_prior_loss += prior_loss.item()
+
 
             num_steps = len(loader.dataset) / args.batch_size
             epoch_mi_loss = total_mi_loss / num_steps
             epoch_prior_loss = total_prior_loss / num_steps
 
-            print(f'{phase} MI loss: {epoch_mi_loss:.4f}, ', end='')
-            print(f'Prior loss: {epoch_prior_loss:.4f}')
+            print(f'{phase} MI loss: {epoch_mi_loss:.5f}, ', end='')
+            print(f'Prior loss: {epoch_prior_loss:.5f}')
 
             loggers[phase].log_scalar('MI-loss', epoch_mi_loss, epoch)
             loggers[phase].log_scalar('Prior-loss', prior_loss, epoch)
